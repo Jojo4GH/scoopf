@@ -56,6 +56,7 @@ class SearchResultMetadata {
     [string] $Repository
     [bool] $OfficialRepository
     [int] $RepositoryStars
+    [string] $BranchName
     [string] $FilePath
     [string] $Committed
     [string] $Sha
@@ -103,6 +104,7 @@ function Find-Query ($query, $page) {
                     Repository = $_.Metadata.Repository
                     OfficialRepository = $_.Metadata.OfficialRepository
                     RepositoryStars = $_.Metadata.RepositoryStars
+                    BranchName = $_.Metadata.BranchName
                     FilePath = $_.Metadata.FilePath
                     Committed = $_.Metadata.Committed
                     Sha = $_.Metadata.Sha
