@@ -24,6 +24,44 @@ $scoopDir = if ($null -eq $env:SCOOP) { "$env:USERPROFILE\scoop" } else { $env:S
 $cacheDir = "$HOME\.cache\scoopf"
 
 
+class SearchResults {
+    [string] ${@odata.context}
+    [int] ${@odata.count}
+    [SearchResult[]] $value
+}
+
+class SearchResult {
+    [float] ${@search.score}
+    [SearchHighlights] ${@search.highlights}
+    [string] $Id
+    [string] $Name
+    [string] $NamePartial
+    [string] $NameSuffix
+    [string] $Description
+    [string] $Notes
+    [string] $Homepage
+    [string] $License
+    [string] $Version
+    [SearchResultMetadata] $Metadata
+}
+
+class SearchHighlights {
+    [string[]] $Description
+    [string[]] $Name
+    [string[]] $NamePartial
+    [string[]] $NameSuffix
+}
+
+class SearchResultMetadata {
+    [string] $Repository
+    [bool] $OfficialRepository
+    [int] $RepositoryStars
+    [string] $FilePath
+    [string] $Committed
+    [string] $Sha
+}
+
+
 function Find-Query ($query, $page) {
     $headers = @{
         "Api-Key" = $apiKey
@@ -34,8 +72,8 @@ function Find-Query ($query, $page) {
         "filter" = "Metadata/DuplicateOf eq null"
         "orderby" = "search.score() desc, Metadata/OfficialRepositoryNumber desc, NameSortable asc"
         "count" = $true
-        "top" = $PageSize
-        "skip" = $PageSize * ($page - 1)
+        "top" = 100000
+        "skip" = 0
     }
 
     $response = Invoke-WebRequest $url -Method POST -Headers $headers -Body (ConvertTo-Json $body) -ContentType "application/json"
@@ -45,7 +83,33 @@ function Find-Query ($query, $page) {
         exit 1
     }
 
-    return ConvertFrom-Json $response.Content
+    $json = ConvertFrom-Json $response.Content
+    return [SearchResults]@{
+        '@odata.context' = $json.'@odata.context'
+        '@odata.count' = $json.'@odata.count'
+        value = $json.value | ForEach-Object {
+            [SearchResult]@{
+                '@search.score' = $_.'@search.score'
+                Id = $_.Id
+                Name = $_.Name
+                NamePartial = $_.NamePartial
+                NameSuffix = $_.NameSuffix
+                Description = $_.Description
+                Notes = $_.Notes
+                Homepage = $_.Homepage
+                License = $_.License
+                Version = $_.Version
+                Metadata = [SearchResultMetadata]@{
+                    Repository = $_.Metadata.Repository
+                    OfficialRepository = $_.Metadata.OfficialRepository
+                    RepositoryStars = $_.Metadata.RepositoryStars
+                    FilePath = $_.Metadata.FilePath
+                    Committed = $_.Metadata.Committed
+                    Sha = $_.Metadata.Sha
+                }
+            }
+        }
+    }
 }
 
 function Get-AvailableBucket {
@@ -97,14 +161,14 @@ function Write-AppShort ($app, $bucketName, $indent = "") {
     Write-Color ""
 }
 
-function Write-AppLong ($app, $bucketName, $indent = "") {
+function Write-AppLong ([SearchResult]$app, $bucketName, $indent = "") {
     function FormatLabel ($label) {
         return $label.PadRight(12, ' ')
     }
 
     $name = $app.Name
 
-    $manifest = "$($app.Metadata.Repository)/blob/master/$($app.Metadata.FilePath)"
+    $manifest = "$($app.Metadata.Repository)/blob/$($app.Metadata.BranchName)/$($app.Metadata.FilePath)"
 
     Write-Color "$indent┌ ", "$name", " ", "@$($app.Version)", " ", "$manifest" -Color White, $appColor, White, DarkCyan, White, DarkGray
     Write-Color "$indent│ ", (FormatLabel "To install:"), " scoop install $bucketName/$name" -Color White, DarkGray, $commandColor
@@ -123,7 +187,7 @@ function Write-AppLong ($app, $bucketName, $indent = "") {
     }
 }
 
-function Write-BucketRating ($metadata) {
+function Write-BucketRating ([SearchResultMetadata] $metadata) {
     if ($metadata.OfficialRepository) {
         Write-Color "✓" -Color $infoColor -NoNewline
     } else {
@@ -131,37 +195,40 @@ function Write-BucketRating ($metadata) {
     }
 }
 
-function Write-Bucket ($apps, $availableBuckets, $long, $indent = "") {
-    $metadata = $apps[0].Metadata
-    $bucket = $metadata.Repository
-    $bucketName = $bucket.Split("/")[-1] -replace "scoop-", "" -replace "Scoop-", ""
-    $bucketName = "$($bucket.Split("/")[-2])_$bucketName"
-    $bucketColor = "Red"
-    $installedBucket = $availableBuckets | Where-Object { $_.url -eq $bucket }
-    if ($null -ne $installedBucket) {
-        $bucket = $installedBucket.name
-        $bucketName = $installedBucket.name
+class Bucket {
+    [string] $Name
+    [string] $url
+    [bool] $isAvailable
+    Bucket ($Name, $url, $isAvailable) {
+        $this.Name = $Name
+        $this.url = $url
+        $this.isAvailable = $isAvailable
+    }
+}
+
+function Write-Bucket ([Bucket] $bucket, [SearchResult[]] $apps, $long, $indent = "") {
+    if ($bucket.isAvailable) {
+        $bucketString = $bucket.Name
         $bucketColor = "Green"
-    } elseif ($metadata.OfficialRepository) {
-        # $bucketColor = "DarkGreen"
+    } else {
+        $bucketString = $bucket.Url
+        $bucketColor = "Red"
     }
 
-    Write-Color "$indent", "$bucket", " " -Color White, $bucketColor, White -NoNewline
-    Write-BucketRating $metadata
-    if (!$long -and $null -eq $installedBucket) {
-        Write-Color "  `tscoop bucket add $bucketName $bucket" -Color $commandColor -NoNewline
-    } else {
-        # Write-Color " [available]" -Color DarkGray -NoNewline
+    Write-Color "$indent", $bucketString, " " -Color White, $bucketColor, White -NoNewline
+    Write-BucketRating $apps[0].Metadata
+    if (!$long -and !$bucket.isAvailable) {
+        Write-Color "  `tscoop bucket add $($bucket.Name) $($bucket.url)" -Color $commandColor -NoNewline
     }
     Write-Color ""
-    if ($long -and $null -eq $installedBucket) {
-        Write-Color "$indent", "→ ", "scoop bucket add $bucketName $bucket" -Color White, DarkGray, $commandColor
+    if ($long -and !$bucket.isAvailable) {
+        Write-Color "$indent", "→ ", "scoop bucket add $($bucket.Name) $($bucket.url)" -Color White, DarkGray, $commandColor
     }
     foreach ($app in $apps) {
         if ($long) {
-            Write-AppLong $app $bucketName -indent "$indent"
+            Write-AppLong $app $bucket.Name -indent "$indent"
         } else {
-            Write-AppShort $app $bucketName -indent "$indent  "
+            Write-AppShort $app $bucket.Name -indent "$indent  "
         }
     }
 }
@@ -183,34 +250,120 @@ if ($Page -gt 1) {
     Write-Color " on page $Page" -NoNewline
 }
 Write-Color " ..."
-$result = Find-Query $Query $Page
+[SearchResults] $results = Find-Query $Query $Page
 
+
+$bucketsByUrl = @{}
+Get-AvailableBucket | ForEach-Object {
+    $bucketsByUrl[$_.url] = [Bucket]::new($_.name, $_.url, $true)
+}
+
+
+function Get-Bucket ($url) {
+    if ($bucketsByUrl.ContainsKey($url)) {
+        return $bucketsByUrl[$url]
+    }
+    $bucketName = $url.Split("/")[-1] -replace "scoop-", "" -replace "Scoop-", ""
+    $bucketName = "$($url.Split("/")[-2])_$bucketName"
+    $bucketsByUrl[$url] = [Bucket]::new($bucketName, $url, $false)
+    return $bucketsByUrl[$url]
+}
+
+class BucketAndApps {
+    [Bucket] $Bucket
+    [SearchResult[]] $Apps
+}
+
+[BucketAndApps[]] $appsByBucket = @()
+$results.value | Group-Object -Property { $_.Metadata.Repository } | ForEach-Object {
+    $appsByBucket += [BucketAndApps]@{
+        "Bucket" = Get-Bucket $_.Name
+        "Apps" = $_.Group
+    }
+}
+
+$appsByBucket = $appsByBucket
+    | Sort-Object -Stable { $_.Bucket.Name }
+    | Sort-Object -Stable { $_.Bucket.isAvailable } -Descending
+    | Sort-Object -Stable { $_.Apps[0].Metadata.OfficialRepository } -Descending
+
+function Get-Page([BucketAndApps[]] $appsByBucket, $Page, $PageSize) {
+    if ($null -eq $appsByBucket) {
+        return @{
+            "PageCount" = 0
+            "AppsByBucket" = @()
+        }
+    }
+    $enumerator = $appsByBucket.GetEnumerator()
+    $toSkip = ($Page - 1) * $PageSize
+    $pageCounter = 0
+    $pageCollected = @()
+    while ($enumerator.MoveNext()) {
+        $current = $enumerator.Current
+        if ($current.Apps.Count -le $toSkip) {
+            # Skip this bucket
+            $toSkip -= $current.Apps.Count
+            continue
+        }
+        if ($toSkip -gt 0) {
+            # Skip some apps in this bucket
+            $current = [BucketAndApps]@{
+                "Bucket" = $current.Bucket
+                "Apps" = $current.Apps[$toSkip..($current.Apps.Count - 1)]
+            }
+            $toSkip = 0
+        }
+        if ($pageCounter + $current.Apps.Count -lt $PageSize) {
+            # Collect all apps in this bucket
+            $pageCounter += $current.Apps.Count
+            $pageCollected += $current
+            continue
+        }
+        if ($pageCounter + $current.Apps.Count -eq $PageSize) {
+            # Collect all apps in this bucket and break
+            $pageCounter += $current.Apps.Count
+            $pageCollected += $current
+            break
+        }
+        # Collect some apps in this bucket
+        $new = [BucketAndApps]@{
+            "Bucket" = $current.Bucket
+            "Apps" = $current.Apps[0..($PageSize - $pageCounter - 1)]
+        }
+        $pageCounter += $new.Apps.Count
+        $pageCollected += $new
+        break
+    }
+    return @{
+        "PageCount" = $pageCounter
+        "AppsByBucket" = $pageCollected
+    }
+}
+
+$pageAppsByBucket = Get-Page $appsByBucket -Page $Page -PageSize $PageSize
 
 # Result processing
-$totalCount = $result.'@odata.count'
-$count = $result.value.Count
-if ($count -eq 0) {
+$totalCount = $results.'@odata.count'
+$pageCount = $pageAppsByBucket.PageCount
+if ($pageCount -eq 0) {
     Write-Color "No results found" -Color Red
     exit 1
 }
 $remainingCount = $totalCount - $PageSize * $Page
-$appsByBucket = $result.value | Group-Object -Property { $_.Metadata.Repository } | Sort-Object -Property { $_.Name } | Sort-Object -Property { $_.Group[0].Metadata.OfficialRepositoryNumber } -Descending
-
 
 # Output
 Write-Color "Found $totalCount result(s) in $($appsByBucket.Count) bucket(s)" -NoNewline
-if ($totalCount -gt $count) {
+if ($totalCount -gt $pageCount) {
     $start = ($Page - 1) * $PageSize + 1
-    $end = $start + $count - 1
+    $end = $start + $pageCount - 1
     Write-Color " (showing $start-$end)" -NoNewline
 }
 Write-Color ":"
 Write-Color ""
 
-$availableBuckets = Get-AvailableBucket
 
-foreach ($apps in $appsByBucket) {
-    Write-Bucket -apps $apps.Group -availableBuckets $availableBuckets -long (!$Short) -indent ""
+foreach ($bucketAndApps in $pageAppsByBucket.AppsByBucket) {
+    Write-Bucket $bucketAndApps.Bucket $bucketAndApps.Apps -long (!$Short) -indent ""
     Write-Color ""
 }
 
